@@ -152,7 +152,7 @@ window.App = (function () {
     var flag = "happyReaderTipShown";
     if (!localStorage.getItem(flag) && !Speech.supported()) {
       localStorage.setItem(flag, "1");
-      alert("小提示：跟读打分功能需要电脑版 Edge 或 Chrome 浏览器（允许麦克风）效果最佳。点读、打卡等其他功能任何浏览器都能用！");
+      alert("小提示：本站任何浏览器都能点读朗读。跟读自动打分建议用电脑版 Edge 或 Chrome（允许麦克风）；手机/平板会自动切换自评打分，一样能打卡哦！");
     }
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
