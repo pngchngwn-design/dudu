@@ -65,6 +65,8 @@
     </div>
     <div class="read-self" id="selfAssess" hidden>
       <p class="self-title">读完了吗？给自己打个分吧！</p>
+      <button class="btn btn-ghost" id="recordReplayBtn" onclick="Speech.playRecording()" hidden>🎧 听听我的录音</button>
+      <div style="height:8px"></div>
       <div class="self-btns">
         <button class="btn btn-big" style="background:linear-gradient(135deg,#43a047,#66bb6a)" onclick="Speech.selfRate(90)">👍 很标准</button>
         <button class="btn btn-big" style="background:linear-gradient(135deg,#fb8c00,#ffa726)" onclick="Speech.selfRate(70)">🙂 差不多</button>
