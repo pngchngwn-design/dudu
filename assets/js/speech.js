@@ -1,15 +1,96 @@
-/* ============ 语音核心：标准读音(TTS) + 跟读识别 + 评分纠正 ============ */
+/* ============ 语音核心：标准读音 + 跟读识别 + 评分纠正 ============
+   兼容策略：
+   1. 朗读：电脑端优先 Web Speech API（speechSynthesis，离线可用）；
+      手机/平板/微信内置等浏览器自动切换【在线 MP3 发音】兜底
+      （有道词典短词 + 百度翻译长句，无需密钥，任何浏览器只要有网就能读）。
+   2. 跟读评分：Chrome/Edge 桌面版用语音识别自动打分；
+      苹果 Safari、微信内置等不支持语音识别的浏览器自动切换【自评模式】，
+      学生听标准音后自评（很标准/差不多/还要练），照常记录打卡。
+   3. 无网或接口异常时给出友好提示，不影响其他功能。
+*/
 window.Speech = (function () {
   var synth = window.speechSynthesis;
   var recog = null;
   var target = null;        // 当前跟读目标 {text, zh}
-  var queue = null;         // 连续跟读队列 {list, index, makeTarget}
+  var queue = null;         // 连续跟读队列 {list, index}
   var listening = false;
+  var curAudio = null;      // 当前播放的 MP3
 
-  /* ---------- 标准读音 ---------- */
+  /* ---------- 设备 / 能力检测 ---------- */
+  function isMobile() {
+    var ua = navigator.userAgent || "";
+    return /Mobi|Android|iPhone|iPad|iPod|Quark|MicroMessenger|UCBrowser|Baidu/.test(ua);
+  }
+  /* 是否有可用的语音合成（桌面 Chrome/Edge 基本都有；部分浏览器有对象但无声音） */
+  function synthUsable() {
+    if (!synth) return false;
+    try {
+      var vs = synth.getVoices();
+      if (!vs || !vs.length) return false;
+      return vs.some(function (v) { return /^en/i.test(v.lang); });
+    } catch (e) { return false; }
+  }
+  function supported() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
+
+  /* ---------- 在线 MP3 发音兜底 ---------- */
+  function ttsUrl(text, slow) {
+    var t = encodeURIComponent(String(text).trim().slice(0, 400));
+    // 纯单词/字母走有道（发音清晰）；含空格的长句走百度（更稳）
+    if (text.trim().indexOf(" ") < 0) return "https://dict.youdao.com/dictvoice?audio=" + t + "&type=2";
+    return "https://fanyi.baidu.com/gettts?lan=en&text=" + t + "&spd=" + (slow ? 3 : 4) + "&source=web";
+  }
+  function playMp3(url, onend) {
+    stopAudio();
+    var a = new Audio(url);
+    curAudio = a;
+    a.preload = "auto";
+    var ended = false;
+    var finish = function () { if (!ended) { ended = true; if (onend) onend(); } };
+    a.onended = finish;
+    a.onerror = function () { finish(); App.toast("语音加载失败，请检查网络后重试"); };
+    var p = a.play();
+    if (p && p.catch) p.catch(function () { finish(); });
+    // 防呆：超过 15 秒没放完也回调（长文本）
+    setTimeout(function () { if (curAudio === a) finish(); }, 15000);
+  }
+  function stopAudio() {
+    if (curAudio) { try { curAudio.pause(); } catch (e) {} curAudio = null; }
+  }
+
+  /* ---------- 标准读音（统一入口） ---------- */
+  function speak(text, slow, onend) {
+    var done = onend || function () {};
+    try { synth && synth.cancel(); } catch (e) {}
+    stopAudio();
+    if (!text || !String(text).trim()) { done(); return; }
+
+    /* 移动端或合成不可用 → 直接在线 MP3（稳定可靠） */
+    if (isMobile() || !synthUsable()) {
+      playMp3(ttsUrl(text, slow), done);
+      return;
+    }
+    /* 桌面端：Web Speech API */
+    var spoken = false;
+    var guard = setTimeout(function () {
+      if (!spoken) { spoken = true; playMp3(ttsUrl(text, slow), done); }
+    }, 3000);
+    try {
+      var u = new SpeechSynthesisUtterance(text);
+      var v = bestVoice();
+      if (v) u.voice = v;
+      u.lang = (v && v.lang) || "en-US";
+      u.rate = slow ? 0.55 : 0.85;
+      u.pitch = 1.05;
+      u.onend = function () { if (!spoken) { spoken = true; clearTimeout(guard); done(); } };
+      u.onerror = function () { if (!spoken) { spoken = true; clearTimeout(guard); playMp3(ttsUrl(text, slow), done); } };
+      synth.speak(u);
+    } catch (e) {
+      if (!spoken) { spoken = true; clearTimeout(guard); playMp3(ttsUrl(text, slow), done); }
+    }
+  }
+
   function pickVoice() {
     var voices = synth ? synth.getVoices() : [];
-    // 优先美式/英式英语女声（更适合跟读），其次任意英语
     var prefs = [
       function (v) { return /en[-_]US/i.test(v.lang) && /female|zira|aria|jenny|samantha|susan|linda|heather/i.test(v.name); },
       function (v) { return /en[-_]GB/i.test(v.lang) && /female|libby|sonia|hazel|kate|emma/i.test(v.name); },
@@ -34,27 +115,9 @@ window.Speech = (function () {
     bestVoice();
   }
 
-  /* text: 要读的英文; slow: 慢速模式 */
-  function speak(text, slow, onend) {
-    if (!synth) { App.toast("这个浏览器不支持朗读，请用 Edge 或 Chrome 打开"); if (onend) onend(); return; }
-    try { synth.cancel(); } catch (e) {}
-    var u = new SpeechSynthesisUtterance(text);
-    var v = bestVoice();
-    if (v) u.voice = v;
-    u.lang = (v && v.lang) || "en-US";
-    u.rate = slow ? 0.55 : 0.85;
-    u.pitch = 1.05;
-    if (onend) {
-      u.onend = onend;
-      u.onerror = onend;
-    }
-    synth.speak(u);
-  }
-
-  /* 播放字母：先读字母名，再读拼读音（A -> [æ]） */
+  /* 播放字母：读字母名（大写单字母，TTS 与在线发音都能读准） */
   function speakLetter(letter) {
-    var text = letter.L + ". " + letter.L.charAt(0) + "."; // "Aa. a."
-    speak(text, false);
+    speak(letter.L.charAt(0).toUpperCase(), false);
   }
 
   /* ---------- 跟读识别 ---------- */
@@ -70,11 +133,9 @@ window.Speech = (function () {
     return recog;
   }
 
-  function supported() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
-
-  /* 打开跟读弹层。item: {text, zh, type, queueList, queueIndex} */
+  /* 打开跟读弹层 */
   function openRead(item, list, index) {
-    target = { text: item.text, zh: item.zh || "", type: item.type || "letter", item: item };
+    target = { text: item.text, zh: item.zh || "", type: item.type || "letter" };
     queue = list ? { list: list, index: index || 0 } : null;
 
     var el = document.getElementById("readModal");
@@ -85,27 +146,59 @@ window.Speech = (function () {
     document.getElementById("readNext").hidden = true;
     document.getElementById("readAnim").classList.remove("listening");
     document.getElementById("btnMic").disabled = false;
+    document.getElementById("selfAssess").hidden = true;
     el.hidden = false;
-    // 自动先读一遍
-    setTimeout(function () { speak(target.text); }, 300);
+
+    // 桌面无识别能力（如苹果 Safari/微信内置）→ 进入自评模式
+    if (!supported()) {
+      showSelfMode("这台设备不支持自动识别打分，请听标准音后自己评价一下吧！");
+    }
+    // 同步调用保持 iOS 手势上下文，自动先读一遍
+    try { speak(target.text); } catch (e) {}
   }
 
   function closeRead() {
     try { if (recog) recog.abort(); } catch (e) {}
     listening = false;
     try { synth.cancel(); } catch (e) {}
+    stopAudio();
     document.getElementById("readModal").hidden = true;
     document.getElementById("btnMic").disabled = false;
+    document.getElementById("selfAssess").hidden = true;
   }
 
   function replayTarget() { speak(target.text); }
 
+  /* ---------- 自评模式（不支持语音识别的设备） ---------- */
+  function showSelfMode(tipText) {
+    var tip = document.getElementById("readTip");
+    if (tipText) tip.textContent = tipText;
+    var micBtn = document.getElementById("btnMic");
+    micBtn.textContent = "🔊 再听一遍";
+    micBtn.onclick = function () { speak(target.text); };
+    var sa = document.getElementById("selfAssess");
+    sa.hidden = false;
+  }
+  function selfRate(score) {
+    var stars = score >= 85 ? "⭐⭐⭐" : score >= 65 ? "⭐⭐" : "⭐";
+    var msg = score >= 85 ? "太棒了！继续加油！" : score >= 65 ? "不错！再练会更标准！" : "别灰心，再跟着读一遍！";
+    showResult({ score: score }, "", null);
+    Store.addRecord(target.type, target.text, score);
+    if (score >= 80) App.reward("");
+    App.refreshToday();
+    if (queue) document.getElementById("readNext").hidden = false;
+    var rs = document.getElementById("readResult");
+    if (rs) {
+      rs.innerHTML = '<div class="stars">' + stars + "</div>" +
+        '<div style="font-size:15px;color:#666;">自评得分：<b style="color:' + (score >= 65 ? "#2e7d32" : "#c62828") + ';font-size:22px;">' + score + "</b> / 100</div>" +
+        '<div class="good">' + msg + "</div>";
+      rs.hidden = false;
+    }
+  }
+
   function startRead() {
     if (!target) return;
-    if (!supported()) {
-      showResult({ score: -1, msg: "当前浏览器不支持语音识别。请用电脑版 Edge 或 Chrome 浏览器打开本站，对准麦克风跟读即可自动评分。" });
-      return;
-    }
+    if (!supported()) { showSelfMode(); return; }
     if (listening) { try { recog.abort(); } catch (e) {} listening = false; }
     var r = getRecognition();
     var animEl = document.getElementById("readAnim");
@@ -117,26 +210,34 @@ window.Speech = (function () {
     tipEl.textContent = "🎤 正在听你读……大声一点哦！";
     micBtn.disabled = true;
     try { synth.cancel(); } catch (e) {}
+    stopAudio();
 
-    var timer = setTimeout(function () { // 12 秒没声音自动放弃
-      try { r.abort(); } catch (e) {}
-    }, 12000);
+    var timer = setTimeout(function () { try { r.abort(); } catch (e) {} }, 12000);
 
     r.onresult = function (ev) {
       clearTimeout(timer);
       var alts = [];
       for (var i = 0; i < ev.results[0].length; i++) alts.push(ev.results[0][i].transcript);
       var best = alts[0] || "";
-      var score = scoreUtterance(target.text, alts);
-      finish(best, score, alts);
+      var res = scoreUtterance(target.text, alts);
+      finish(best, res, alts);
     };
     r.onerror = function (ev) {
       clearTimeout(timer);
       listening = false;
       animEl.classList.remove("listening");
       micBtn.disabled = false;
-      var m = { "not-allowed": "麦克风没开哦！请在浏览器地址栏允许使用麦克风", "no-speech": "没有听到声音，再试一次吧", "audio-capture": "找不到麦克风，请检查设备", network: "网络不稳定，再试一次吧" };
+      var m = {
+        "not-allowed": "麦克风没开哦！请在浏览器地址栏允许使用麦克风",
+        "no-speech": "没有听到声音，再试一次吧",
+        "audio-capture": "找不到麦克风，请检查设备",
+        network: "识别服务连不上（网络原因）"
+      };
       tipEl.textContent = m[ev.error] || ("识别出错了：" + ev.error + "，再试一次吧");
+      // 网络/服务类错误 → 提供自评模式兜底
+      if (ev.error === "network" || ev.error === "service-not-allowed" || ev.error === "not-allowed") {
+        showSelfMode("自动打分暂时用不了，你可以听标准音后自己评价：");
+      }
     };
     r.onend = function () {
       clearTimeout(timer);
@@ -145,7 +246,10 @@ window.Speech = (function () {
       micBtn.disabled = false;
     };
     try { r.start(); } catch (e) {
-      listening = false; animEl.classList.remove("listening"); micBtn.disabled = false;
+      listening = false;
+      animEl.classList.remove("listening");
+      micBtn.disabled = false;
+      showSelfMode("识别启动失败，你可以听标准音后自己评价：");
     }
 
     function finish(heard, res, alts) {
@@ -153,12 +257,11 @@ window.Speech = (function () {
       animEl.classList.remove("listening");
       micBtn.disabled = false;
       showResult(res, heard, alts);
-      // 记录打卡
       if (res.score >= 0) {
         Store.addRecord(target.type, target.text, res.score);
         if (res.score >= 80) App.reward(heard);
         App.refreshToday();
-        if (queue) { document.getElementById("readNext").hidden = false; }
+        if (queue) document.getElementById("readNext").hidden = false;
       }
     }
   }
@@ -171,8 +274,6 @@ window.Speech = (function () {
       .trim();
   }
   function words(s) { return normalize(s).split(" ").filter(Boolean); }
-
-  /* 编辑距离 */
   function editDistance(a, b) {
     var m = a.length, n = b.length;
     if (!m) return n; if (!n) return m;
@@ -187,18 +288,14 @@ window.Speech = (function () {
     }
     return prev[n];
   }
-
-  /* 综合评分：字符级 + 单词级，取候选中最高的 */
   function scoreUtterance(targetText, alts) {
     var tNorm = normalize(targetText);
     var best = -1, bestAlt = "";
     for (var i = 0; i < alts.length; i++) {
       var a = normalize(alts[i]);
       if (!a) continue;
-      // 字符级
       var cd = editDistance(tNorm, a);
       var charScore = Math.max(0, 1 - cd / Math.max(tNorm.length, a.length)) * 100;
-      // 单词级
       var tw = words(targetText), aw = words(alts[i]);
       var hit = 0;
       tw.forEach(function (w) { if (aw.indexOf(w) >= 0) hit++; });
@@ -209,12 +306,11 @@ window.Speech = (function () {
     return { score: best, alt: bestAlt };
   }
 
-  /* ---------- 结果展示 + 纠正提示 ---------- */
+  /* ---------- 结果展示 ---------- */
   function showResult(res, heard, alts) {
     var box = document.getElementById("readResult");
     var tip = document.getElementById("readTip");
-    var targetText = target ? target.text : "";
-    if (res.score < 0 && res.msg) { // 不支持等场景
+    if (res.score < 0 && res.msg) {
       box.hidden = false;
       box.innerHTML = '<div class="fix">' + escapeHtml(res.msg) + "</div>";
       tip.textContent = "";
@@ -227,10 +323,9 @@ window.Speech = (function () {
     else if (score >= 40) { stars = "⭐";     msg = "有点接近了，跟着标准读音再读一次！"; cls = "fix"; }
     else                  { stars = "🌟";    msg = "别灰心！先慢慢跟读两遍标准读音，再试试！"; cls = "fix"; }
 
-    // 纠错建议：找出没读准的单词
     var fixTips = "";
     if (score < 85) {
-      var tw = words(targetText), aw = words(heard || "");
+      var tw = words(targetText()), aw = words(heard || "");
       var missed = tw.filter(function (w) { return aw.indexOf(w) < 0; });
       if (missed.length) {
         fixTips = '<div class="fix">💪 这' + (missed.length > 1 ? "几个" : "个") + "单词再练练：<b>" +
@@ -248,7 +343,6 @@ window.Speech = (function () {
       fixTips;
     tip.textContent = msg;
 
-    // 慢速重听按钮
     if (score < 85) {
       var btns = document.getElementById("readBtnsSlow");
       if (!btns) {
@@ -260,6 +354,7 @@ window.Speech = (function () {
       }
     }
   }
+  function targetText() { return target ? target.text : ""; }
 
   function speakSlow() { speak(target.text, true); }
 
@@ -273,8 +368,7 @@ window.Speech = (function () {
       App.reward("全对");
       return;
     }
-    var it = queue.list[queue.index];
-    openRead(it, queue.list, queue.index);
+    openRead(queue.list[queue.index], queue.list, queue.index);
   }
 
   function escapeHtml(s) {
@@ -286,6 +380,7 @@ window.Speech = (function () {
   return {
     speak: speak, speakLetter: speakLetter, speakSlow: speakSlow,
     openRead: openRead, closeRead: closeRead, startRead: startRead,
-    replayTarget: replayTarget, readNext: readNext, supported: supported
+    replayTarget: replayTarget, readNext: readNext, supported: supported,
+    selfRate: selfRate
   };
 })();
