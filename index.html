@@ -63,6 +63,14 @@
       <button class="btn btn-big" onclick="Speech.replayTarget()">🔊 听读音</button>
       <button class="btn btn-big btn-mic" id="btnMic" onclick="Speech.startRead()">🎤 跟读</button>
     </div>
+    <div class="read-self" id="selfAssess" hidden>
+      <p class="self-title">读完了吗？给自己打个分吧！</p>
+      <div class="self-btns">
+        <button class="btn btn-big" style="background:linear-gradient(135deg,#43a047,#66bb6a)" onclick="Speech.selfRate(90)">👍 很标准</button>
+        <button class="btn btn-big" style="background:linear-gradient(135deg,#fb8c00,#ffa726)" onclick="Speech.selfRate(70)">🙂 差不多</button>
+        <button class="btn btn-big" style="background:linear-gradient(135deg,#ef5350,#f4511e)" onclick="Speech.selfRate(45)">💪 还要练</button>
+      </div>
+    </div>
     <div class="read-next" id="readNext" hidden>
       <button class="btn btn-big btn-primary" onclick="Speech.readNext(1)">下一个 ➜</button>
     </div>
