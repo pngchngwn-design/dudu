@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="description" content="快乐点读乐园 - 三年级英语点读、跟读纠音、每日打卡学习乐园">
+<title>快乐点读乐园 · 三年级英语点读打卡</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="assets/css/style.css">
+</head>
+<body data-theme="puppy">
+
+<!-- 顶部横幅 -->
+<header class="topbar" id="topbar">
+  <div class="topbar-inner">
+    <div class="brand" onclick="App.go('letters')">
+      <span class="brand-star">★</span>
+      <div class="brand-text">
+        <h1>快乐点读乐园</h1>
+        <p>三年级英语 · 点读 跟读 每日打卡</p>
+      </div>
+    </div>
+    <div class="topbar-actions">
+      <div class="student-box" id="studentBox">
+        <label for="studentSelect">👦 当前同学</label>
+        <select id="studentSelect" onchange="App.switchStudent(this.value)"></select>
+      </div>
+      <button class="btn btn-light btn-icon" id="btnManageStudents" onclick="App.openStudentManager()" title="管理学生">＋</button>
+      <button class="btn btn-light btn-icon" id="btnThemeQuick" onclick="App.go('themes')" title="换主题">🎨</button>
+    </div>
+  </div>
+</header>
+
+<!-- 主内容区：各视图 -->
+<main id="main">
+  <section class="view" id="view-letters"></section>
+  <section class="view" id="view-words"></section>
+  <section class="view" id="view-reader"></section>
+  <section class="view" id="view-resources"></section>
+  <section class="view" id="view-records"></section>
+  <section class="view" id="view-themes"></section>
+</main>
+
+<!-- 底部导航 -->
+<nav class="tabbar" id="tabbar">
+  <button class="tab active" data-view="letters" onclick="App.go('letters')"><span class="tab-ico">🏠</span><span>点读台</span></button>
+  <button class="tab" data-view="words" onclick="App.go('words')"><span class="tab-ico">📚</span><span>单词库</span></button>
+  <button class="tab" data-view="reader" onclick="App.go('reader')"><span class="tab-ico">✏️</span><span>句子</span></button>
+  <button class="tab" data-view="resources" onclick="App.go('resources')"><span class="tab-ico">📁</span><span>资源</span></button>
+  <button class="tab" data-view="records" onclick="App.go('records')"><span class="tab-ico">🏆</span><span>打卡</span></button>
+  <button class="tab" data-view="themes" onclick="App.go('themes')"><span class="tab-ico">🎨</span><span>主题</span></button>
+</nav>
+
+<!-- 跟读弹层 -->
+<div class="modal-mask" id="readModal" hidden>
+  <div class="modal read-modal">
+    <button class="modal-close" onclick="Speech.closeRead()">✕</button>
+    <div class="read-target" id="readTarget">Aa</div>
+    <div class="read-tip" id="readTip">先听标准读音，再点麦克风跟读吧！</div>
+    <div class="read-anim" id="readAnim"><span class="mic">🎤</span></div>
+    <div class="read-result" id="readResult" hidden></div>
+    <div class="read-btns">
+      <button class="btn btn-big" onclick="Speech.replayTarget()">🔊 听读音</button>
+      <button class="btn btn-big btn-mic" id="btnMic" onclick="Speech.startRead()">🎤 跟读</button>
+    </div>
+    <div class="read-next" id="readNext" hidden>
+      <button class="btn btn-big btn-primary" onclick="Speech.readNext(1)">下一个 ➜</button>
+    </div>
+  </div>
+</div>
+
+<!-- 学生管理弹层 -->
+<div class="modal-mask" id="studentModal" hidden>
+  <div class="modal student-modal">
+    <button class="modal-close" onclick="App.closeStudentManager()">✕</button>
+    <h2>👧 学生管理</h2>
+    <div class="add-row">
+      <input type="text" id="newStudentName" maxlength="12" placeholder="输入学生姓名，如：李小明">
+      <button class="btn btn-primary" onclick="App.addStudent()">添加</button>
+    </div>
+    <ul class="student-list" id="studentList"></ul>
+    <p class="modal-note">每个学生的打卡记录独立保存，互不影响。</p>
+  </div>
+</div>
+
+<!-- Toast -->
+<div id="toast" class="toast" hidden></div>
+
+<!-- 星星奖励动画 -->
+<div id="rewardLayer"></div>
+
+<script src="assets/js/data.js"></script>
+<script src="assets/js/storage.js"></script>
+<script src="assets/js/speech.js"></script>
+<script src="assets/js/views.js"></script>
+<script src="assets/js/records-view.js"></script>
+<script src="assets/js/app.js"></script>
+</body>
+</html>
