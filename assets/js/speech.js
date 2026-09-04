@@ -1,12 +1,12 @@
-/* ============ 语音核心：标准读音 + 跟读识别 + 评分纠正 ============
+/* ============ 语音核心：标准读音 + 跟读 + 评分纠正 ============
    兼容策略：
-   1. 朗读：电脑端优先 Web Speech API（speechSynthesis，离线可用）；
-      手机/平板/微信内置等浏览器自动切换【在线 MP3 发音】兜底
-      （有道词典短词 + 百度翻译长句，无需密钥，任何浏览器只要有网就能读）。
-   2. 跟读评分：Chrome/Edge 桌面版用语音识别自动打分；
-      苹果 Safari、微信内置等不支持语音识别的浏览器自动切换【自评模式】，
-      学生听标准音后自评（很标准/差不多/还要练），照常记录打卡。
-   3. 无网或接口异常时给出友好提示，不影响其他功能。
+   1. 朗读：电脑端优先 Web Speech API；手机/平板/微信内置等自动切换
+      【在线 MP3 发音】兜底（有道短词 + 百度长句，任何浏览器有网即可读）。
+   2. 跟读评分：
+      - 桌面 Chrome/Edge：语音识别自动打分；
+      - 手机/苹果/微信内置/不支持识别或网络失败：切换【录音跟读】模式——
+        听标准音 → 录下孩子朗读 → 自动回放对比 → 孩子自评打分 → 照常打卡。
+   3. 无网或接口异常给出友好提示，不影响其他功能。
 */
 window.Speech = (function () {
   var synth = window.speechSynthesis;
@@ -16,12 +16,18 @@ window.Speech = (function () {
   var listening = false;
   var curAudio = null;      // 当前播放的 MP3
 
+  // 录音状态
+  var recorder = null;
+  var recStream = null;
+  var recChunks = [];
+  var recUrl = null;
+  var recState = "idle";    // idle | recording | done
+
   /* ---------- 设备 / 能力检测 ---------- */
   function isMobile() {
     var ua = navigator.userAgent || "";
     return /Mobi|Android|iPhone|iPad|iPod|Quark|MicroMessenger|UCBrowser|Baidu/.test(ua);
   }
-  /* 是否有可用的语音合成（桌面 Chrome/Edge 基本都有；部分浏览器有对象但无声音） */
   function synthUsable() {
     if (!synth) return false;
     try {
@@ -31,11 +37,13 @@ window.Speech = (function () {
     } catch (e) { return false; }
   }
   function supported() { return !!(window.SpeechRecognition || window.webkitSpeechRecognition); }
+  function canRecord() {
+    return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+  }
 
   /* ---------- 在线 MP3 发音兜底 ---------- */
   function ttsUrl(text, slow) {
     var t = encodeURIComponent(String(text).trim().slice(0, 400));
-    // 纯单词/字母走有道（发音清晰）；含空格的长句走百度（更稳）
     if (text.trim().indexOf(" ") < 0) return "https://dict.youdao.com/dictvoice?audio=" + t + "&type=2";
     return "https://fanyi.baidu.com/gettts?lan=en&text=" + t + "&spd=" + (slow ? 3 : 4) + "&source=web";
   }
@@ -50,7 +58,6 @@ window.Speech = (function () {
     a.onerror = function () { finish(); App.toast("语音加载失败，请检查网络后重试"); };
     var p = a.play();
     if (p && p.catch) p.catch(function () { finish(); });
-    // 防呆：超过 15 秒没放完也回调（长文本）
     setTimeout(function () { if (curAudio === a) finish(); }, 15000);
   }
   function stopAudio() {
@@ -63,13 +70,10 @@ window.Speech = (function () {
     try { synth && synth.cancel(); } catch (e) {}
     stopAudio();
     if (!text || !String(text).trim()) { done(); return; }
-
-    /* 移动端或合成不可用 → 直接在线 MP3（稳定可靠） */
     if (isMobile() || !synthUsable()) {
       playMp3(ttsUrl(text, slow), done);
       return;
     }
-    /* 桌面端：Web Speech API */
     var spoken = false;
     var guard = setTimeout(function () {
       if (!spoken) { spoken = true; playMp3(ttsUrl(text, slow), done); }
@@ -115,12 +119,11 @@ window.Speech = (function () {
     bestVoice();
   }
 
-  /* 播放字母：读字母名（大写单字母，TTS 与在线发音都能读准） */
   function speakLetter(letter) {
     speak(letter.L.charAt(0).toUpperCase(), false);
   }
 
-  /* ---------- 跟读识别 ---------- */
+  /* ---------- 跟读识别（桌面） ---------- */
   function getRecognition() {
     if (recog) return recog;
     var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -133,7 +136,7 @@ window.Speech = (function () {
     return recog;
   }
 
-  /* 打开跟读弹层 */
+  /* ---------- 打开跟读弹层 ---------- */
   function openRead(item, list, index) {
     target = { text: item.text, zh: item.zh || "", type: item.type || "letter" };
     queue = list ? { list: list, index: index || 0 } : null;
@@ -145,15 +148,20 @@ window.Speech = (function () {
     document.getElementById("readResult").hidden = true;
     document.getElementById("readNext").hidden = true;
     document.getElementById("readAnim").classList.remove("listening");
-    document.getElementById("btnMic").disabled = false;
     document.getElementById("selfAssess").hidden = true;
+    var micBtn = document.getElementById("btnMic");
+    micBtn.disabled = false;
+    micBtn.textContent = "🎤 跟读";
+    micBtn.onclick = startRead;
+    resetRecordState();
     el.hidden = false;
 
-    // 桌面无识别能力（如苹果 Safari/微信内置）→ 进入自评模式
-    if (!supported()) {
-      showSelfMode("这台设备不支持自动识别打分，请听标准音后自己评价一下吧！");
+    // 手机/不支持识别的设备 → 录音跟读模式
+    if (!supported() || isMobile()) {
+      enterRecordMode("先听标准读音，然后点「跟读」录下你的朗读吧！");
+    } else {
+      micBtn.onclick = startRead;
     }
-    // 同步调用保持 iOS 手势上下文，自动先读一遍
     try { speak(target.text); } catch (e) {}
   }
 
@@ -162,6 +170,7 @@ window.Speech = (function () {
     listening = false;
     try { synth.cancel(); } catch (e) {}
     stopAudio();
+    stopRecordStream();
     document.getElementById("readModal").hidden = true;
     document.getElementById("btnMic").disabled = false;
     document.getElementById("selfAssess").hidden = true;
@@ -169,36 +178,135 @@ window.Speech = (function () {
 
   function replayTarget() { speak(target.text); }
 
-  /* ---------- 自评模式（不支持语音识别的设备） ---------- */
-  function showSelfMode(tipText) {
+  /* ================= 录音跟读模式（手机/平板等） ================= */
+  function resetRecordState() {
+    recState = "idle";
+    recUrl = null;
+    recChunks = [];
+    stopRecordStream();
+  }
+
+  function stopRecordStream() {
+    if (recStream) {
+      try { recStream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+      recStream = null;
+    }
+    recorder = null;
+  }
+
+  function enterRecordMode(tipText) {
     var tip = document.getElementById("readTip");
     if (tipText) tip.textContent = tipText;
     var micBtn = document.getElementById("btnMic");
-    micBtn.textContent = "🔊 再听一遍";
-    micBtn.onclick = function () { speak(target.text); };
-    var sa = document.getElementById("selfAssess");
-    sa.hidden = false;
+    micBtn.textContent = "🎤 跟读";
+    micBtn.onclick = startRecordFlow;
+    micBtn.disabled = false;
+    // 隐藏自评，录音完成后再显示
+    document.getElementById("selfAssess").hidden = true;
+    document.getElementById("recordReplayBtn").hidden = true;
+    document.getElementById("readAnim").classList.remove("listening");
   }
+
+  function startRecordFlow() {
+    if (!canRecord()) {
+      // 不支持录音 → 纯自评
+      showSelfButtons("这台设备不支持录音，请听标准音后自己评价吧：");
+      return;
+    }
+    if (recState === "recording") { stopRecordFlow(); return; }
+    var tip = document.getElementById("readTip");
+    var animEl = document.getElementById("readAnim");
+    var micBtn = document.getElementById("btnMic");
+    stopAudio();
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      recStream = stream;
+      try { recog && recog.abort(); } catch (e) {}
+      recChunks = [];
+      try {
+        recorder = new MediaRecorder(stream);
+      } catch (e) {
+        stopRecordStream();
+        showSelfButtons("无法启动录音，请听标准音后自己评价吧：");
+        return;
+      }
+      recorder.ondataavailable = function (e) { if (e.data && e.data.size) recChunks.push(e.data); };
+      recorder.onstop = function () {
+        var mime = (recorder && recorder.mimeType) || "audio/webm";
+        var blob = new Blob(recChunks, { type: mime });
+        if (recUrl) { try { URL.revokeObjectURL(recUrl); } catch (e) {} }
+        recUrl = URL.createObjectURL(blob);
+        recState = "done";
+        stopRecordStream();
+        afterRecorded();
+      };
+      recorder.start();
+      recState = "recording";
+      tip.textContent = "🔴 正在录音……大声朗读，读完点「停止」";
+      micBtn.textContent = "⏹ 停止跟读";
+      animEl.classList.add("listening");
+    }).catch(function () {
+      showSelfButtons("没有拿到麦克风权限，请听标准音后自己评价吧：");
+    });
+  }
+
+  function stopRecordFlow() {
+    if (recorder && recorder.state === "recording") {
+      try { recorder.stop(); } catch (e) {}
+    }
+  }
+
+  function afterRecorded() {
+    var animEl = document.getElementById("readAnim");
+    var micBtn = document.getElementById("btnMic");
+    animEl.classList.remove("listening");
+    micBtn.textContent = "🔁 再读一次";
+    // 自动回放孩子的录音
+    var tip = document.getElementById("readTip");
+    tip.textContent = "🎧 听听你刚才的录音（已自动播放），再对照标准音点「听读音」！";
+    playRecording();
+    showSelfButtons("对照标准音，你觉得刚才读得怎么样？");
+  }
+
+  function playRecording() {
+    if (recUrl) {
+      stopAudio();
+      var a = new Audio(recUrl);
+      curAudio = a;
+      var p = a.play();
+      if (p && p.catch) p.catch(function () {});
+    }
+  }
+
+  function showSelfButtons(tipText) {
+    var tip = document.getElementById("readTip");
+    if (tipText) tip.textContent = tipText;
+    document.getElementById("recordReplayBtn").hidden = !recUrl;
+    document.getElementById("selfAssess").hidden = false;
+  }
+
+  /* 自评打分 */
   function selfRate(score) {
     var stars = score >= 85 ? "⭐⭐⭐" : score >= 65 ? "⭐⭐" : "⭐";
     var msg = score >= 85 ? "太棒了！继续加油！" : score >= 65 ? "不错！再练会更标准！" : "别灰心，再跟着读一遍！";
-    showResult({ score: score }, "", null);
+    var rs = document.getElementById("readResult");
+    rs.innerHTML = '<div class="stars">' + stars + "</div>" +
+      '<div style="font-size:15px;color:#666;">自评得分：<b style="color:' + (score >= 65 ? "#2e7d32" : "#c62828") + ';font-size:22px;">' + score + "</b> / 100</div>" +
+      '<div class="good">' + msg + "</div>";
+    rs.hidden = false;
     Store.addRecord(target.type, target.text, score);
     if (score >= 80) App.reward("");
     App.refreshToday();
     if (queue) document.getElementById("readNext").hidden = false;
-    var rs = document.getElementById("readResult");
-    if (rs) {
-      rs.innerHTML = '<div class="stars">' + stars + "</div>" +
-        '<div style="font-size:15px;color:#666;">自评得分：<b style="color:' + (score >= 65 ? "#2e7d32" : "#c62828") + ';font-size:22px;">' + score + "</b> / 100</div>" +
-        '<div class="good">' + msg + "</div>";
-      rs.hidden = false;
-    }
+    // 重新显示"听读音"便于对比
+    var micBtn = document.getElementById("btnMic");
+    if (recUrl) micBtn.textContent = "🔁 再读一次";
   }
 
+  /* ---------- 跟读识别（桌面） ---------- */
   function startRead() {
     if (!target) return;
-    if (!supported()) { showSelfMode(); return; }
+    // 手机/不支持识别 → 录音跟读
+    if (!supported() || isMobile()) { enterRecordMode(); startRecordFlow(); return; }
     if (listening) { try { recog.abort(); } catch (e) {} listening = false; }
     var r = getRecognition();
     var animEl = document.getElementById("readAnim");
@@ -234,9 +342,9 @@ window.Speech = (function () {
         network: "识别服务连不上（网络原因）"
       };
       tipEl.textContent = m[ev.error] || ("识别出错了：" + ev.error + "，再试一次吧");
-      // 网络/服务类错误 → 提供自评模式兜底
-      if (ev.error === "network" || ev.error === "service-not-allowed" || ev.error === "not-allowed") {
-        showSelfMode("自动打分暂时用不了，你可以听标准音后自己评价：");
+      if (ev.error === "network" || ev.error === "service-not-allowed" || ev.error === "not-allowed" ||
+          ev.error === "aborted") {
+        enterRecordMode("自动打分不可用，已切换录音跟读：点「跟读」录下你的朗读吧！");
       }
     };
     r.onend = function () {
@@ -249,7 +357,7 @@ window.Speech = (function () {
       listening = false;
       animEl.classList.remove("listening");
       micBtn.disabled = false;
-      showSelfMode("识别启动失败，你可以听标准音后自己评价：");
+      enterRecordMode("识别启动失败，已切换录音跟读：点「跟读」录下你的朗读吧！");
     }
 
     function finish(heard, res, alts) {
@@ -306,7 +414,7 @@ window.Speech = (function () {
     return { score: best, alt: bestAlt };
   }
 
-  /* ---------- 结果展示 ---------- */
+  /* ---------- 结果展示（桌面自动识别） ---------- */
   function showResult(res, heard, alts) {
     var box = document.getElementById("readResult");
     var tip = document.getElementById("readTip");
@@ -325,7 +433,7 @@ window.Speech = (function () {
 
     var fixTips = "";
     if (score < 85) {
-      var tw = words(targetText()), aw = words(heard || "");
+      var tw = words(target ? target.text : ""), aw = words(heard || "");
       var missed = tw.filter(function (w) { return aw.indexOf(w) < 0; });
       if (missed.length) {
         fixTips = '<div class="fix">💪 这' + (missed.length > 1 ? "几个" : "个") + "单词再练练：<b>" +
@@ -354,7 +462,6 @@ window.Speech = (function () {
       }
     }
   }
-  function targetText() { return target ? target.text : ""; }
 
   function speakSlow() { speak(target.text, true); }
 
@@ -381,6 +488,6 @@ window.Speech = (function () {
     speak: speak, speakLetter: speakLetter, speakSlow: speakSlow,
     openRead: openRead, closeRead: closeRead, startRead: startRead,
     replayTarget: replayTarget, readNext: readNext, supported: supported,
-    selfRate: selfRate
+    selfRate: selfRate, playRecording: playRecording
   };
 })();
